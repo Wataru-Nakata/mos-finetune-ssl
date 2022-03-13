@@ -137,45 +137,48 @@ def main():
     predictions = { }  # filename : prediction
     criterion = nn.L1Loss()
     print('Starting prediction')
-
-    for i, data in enumerate(validloader, 0):
-        inputs, labels, filenames = data
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        total_loss += loss.item()
-        
-        output = outputs.cpu().detach().numpy()[0]
-        predictions[filenames[0]] = output  ## batch size = 1
+    with torch.no_grad():
+        for i, data in enumerate(validloader, 0):
+            inputs, labels, filenames = data
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            
+            output = outputs.cpu().detach().numpy()[0]
+            predictions[filenames[0]] = output  ## batch size = 1
 
     bvcc_truth_file = os.path.join(datadir, "sets/test_mos_list.txt")
     bvcc_truth = read_file(bvcc_truth_file)
     bvcc_truth_file_dev = os.path.join(datadir, "sets/val_mos_list.txt")
     bvcc_truth_dev = read_file(bvcc_truth_file_dev)
-    calculate_scores(bvcc_truth_dev,predictions,prefix=datadir.split('/')[-1]+"DEV")
     ans = open(outfile+'_dev', 'w')
     for k, v in predictions.items():
         outl = k.split('.')[0] + ',' + str(v) + '\n'
         ans.write(outl)
     ans.close()
-    for i, data in enumerate(testloader, 0):
-        inputs, labels, filenames = data
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        total_loss += loss.item()
-        
-        output = outputs.cpu().detach().numpy()[0]
-        predictions[filenames[0]] = output  ## batch size = 1
+    scores = calculate_scores(bvcc_truth_dev,read_file(outfile+"_dev"),prefix=datadir.split('/')[-1]+"DEV")
+    print(scores)
+    with torch.no_grad():
+        for i, data in enumerate(testloader, 0):
+            inputs, labels, filenames = data
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            
+            output = outputs.cpu().detach().numpy()[0]
+            predictions[filenames[0]] = output  ## batch size = 1
 
     ans = open(outfile+"_test", 'w')
     for k, v in predictions.items():
         outl = k.split('.')[0] + ',' + str(v) + '\n'
         ans.write(outl)
     ans.close()
-    calculate_scores(bvcc_truth,predictions,prefix=datadir.split('/')[-1]+"TEST")
+    scores = calculate_scores(bvcc_truth,read_file(outfile+"_test"),prefix=datadir.split('/')[-1]+"TEST")
+    print(scores)
 
 if __name__ == '__main__':
     main()
