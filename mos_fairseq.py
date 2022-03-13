@@ -117,7 +117,7 @@ class MyDataset(Dataset):
         wavpath = os.path.join(self.wavdir, wavname)
         wav = torchaudio.load(wavpath)[0]
         score = self.mos_lookup[wavname]
-        return wav[:1000], score, wavname
+        return wav, score, wavname
     
 
     def __len__(self):
@@ -209,7 +209,6 @@ def main():
             optimizer.step()
             STEPS += 1
             running_loss += loss.item()
-            break
         print('EPOCH: ' + str(epoch))
         print('AVG EPOCH TRAIN LOSS: ' + str(running_loss / STEPS))
         epoch_val_loss = 0.0

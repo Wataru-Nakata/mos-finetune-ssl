@@ -19,7 +19,6 @@ def systemID(uttID):
     return uttID.split('-')[0]
 
 
-def calc_score()
 import os.path
 
 import numpy as np
