@@ -14,7 +14,73 @@ import torch.optim as optim
 from torch.utils.data.dataset import Dataset
 from torch.utils.data import DataLoader
 import random
+import scipy.stats
+import numpy as np
 random.seed(1984)
+
+def systemID(uttID):
+    return uttID.split('-')[0]
+def get_true_sys_mos(system_csv_path):
+    ### SYSTEM
+    true_sys_MOS_avg = { }
+    csv_file = open(system_csv_path, 'r')
+    csv_file.readline()  ## skip header
+    for line in csv_file:
+        parts = line.strip().split(',')
+        sysID = parts[0]
+        MOS = float(parts[1])
+        true_sys_MOS_avg[sysID] = MOS
+    return true_sys_MOS_avg
+
+def compute_sys_metrics(predictions, true_sys_MOS_avg):
+    sorted_uttIDs = sorted(predictions.keys())
+    pred_sys_MOSes = { }
+    for uttID in sorted_uttIDs:
+        sysID = systemID(uttID)
+        noop = pred_sys_MOSes.setdefault(sysID, [ ])
+        pred_sys_MOSes[sysID].append(predictions[uttID])
+
+    pred_sys_MOS_avg = { }
+    for k, v in pred_sys_MOSes.items():
+        avg_MOS = sum(v) / (len(v) * 1.0)
+        pred_sys_MOS_avg[k] = avg_MOS
+    
+    ## make lists sorted by system
+    pred_sysIDs = sorted(pred_sys_MOS_avg.keys())
+    sys_p = [ ]
+    sys_t = [ ]
+    for sysID in pred_sysIDs:
+        sys_p.append(pred_sys_MOS_avg[sysID])
+        sys_t.append(true_sys_MOS_avg[sysID])
+
+    sys_true = np.array(sys_t)
+    sys_predicted = np.array(sys_p)
+    
+    MSE=np.mean((sys_true-sys_predicted)**2)
+    LCC=np.corrcoef(sys_true, sys_predicted)
+    SRCC=scipy.stats.spearmanr(sys_true.T, sys_predicted.T)
+    KTAU=scipy.stats.kendalltau(sys_true, sys_predicted)
+    return dict(SRCC=SRCC[0], MSE=MSE, LCC=LCC[0][1], KTAU=KTAU[0])
+
+def compute_utt_metrics(predictions, true_MOS):
+    ts = []
+    ps = []
+    sorted_uttIDs = sorted(predictions.keys())
+    for uttID in sorted_uttIDs:
+        t = true_MOS[uttID]
+        p = predictions[uttID]
+        ts.append(t)
+        ps.append(p)
+    truths = np.array(ts)
+    preds = np.array(ps)
+    
+    
+    MSE=np.mean((truths-preds)**2)
+    LCC=np.corrcoef(truths, preds)
+    SRCC=scipy.stats.spearmanr(truths.T, preds.T)
+    KTAU=scipy.stats.kendalltau(truths, preds)
+
+    return dict(MSE=MSE, LCC=LCC[0][1], SRCC=SRCC[0], KTAU=KTAU[0])
 
 class MosPredictor(nn.Module):
     def __init__(self, ssl_model, ssl_out_dim):
@@ -51,7 +117,7 @@ class MyDataset(Dataset):
         wavpath = os.path.join(self.wavdir, wavname)
         wav = torchaudio.load(wavpath)[0]
         score = self.mos_lookup[wavname]
-        return wav, score, wavname
+        return wav[:1000], score, wavname
     
 
     def __len__(self):
@@ -114,7 +180,7 @@ def main():
     trainloader = DataLoader(trainset, batch_size=4, shuffle=True, num_workers=2, collate_fn=trainset.collate_fn)
 
     validset = MyDataset(wavdir, validlist)
-    validloader = DataLoader(validset, batch_size=2, shuffle=True, num_workers=2, collate_fn=validset.collate_fn)
+    validloader = DataLoader(validset, batch_size=1, shuffle=False, num_workers=2, collate_fn=validset.collate_fn)
 
     net = MosPredictor(ssl_model, SSL_OUT_DIM)
     net = net.to(device)
@@ -143,6 +209,7 @@ def main():
             optimizer.step()
             STEPS += 1
             running_loss += loss.item()
+            break
         print('EPOCH: ' + str(epoch))
         print('AVG EPOCH TRAIN LOSS: ' + str(running_loss / STEPS))
         epoch_val_loss = 0.0
@@ -152,21 +219,30 @@ def main():
             torch.cuda.empty_cache()
         ## validation
         VALSTEPS=0
-        for i, data in enumerate(validloader, 0):
-            VALSTEPS+=1
-            inputs, labels, filenames = data
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            epoch_val_loss += loss.item()
+        predictions = {}
+        with torch.no_grad():
+            for i, data in enumerate(validloader, 0):
+                VALSTEPS+=1
+                inputs, labels, filenames = data
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
+                epoch_val_loss += loss.item()
+                for filename, utt_score in zip(filenames,outputs):
+                    predictions[filename] = utt_score.detach().cpu().numpy()
 
+        val_metrics = compute_sys_metrics(predictions, get_true_sys_mos(os.path.join(datadir,"mydata_system.csv")))
+        val_srcc = -val_metrics['SRCC']
         avg_val_loss=epoch_val_loss/VALSTEPS    
+        for k, v in val_metrics.items():
+            print(f'EPOCH sysytem {k}: {v}')
         print('EPOCH VAL LOSS: ' + str(avg_val_loss))
-        if avg_val_loss < PREV_VAL_LOSS:
-            print('Loss has decreased')
-            PREV_VAL_LOSS=avg_val_loss
-            PATH = os.path.join(ckptdir, 'ckpt_' + str(epoch))
+        print('EPOCH SRCC: ' + str(-val_srcc))
+        if val_srcc < PREV_VAL_LOSS:
+            print('SRCC has increased')
+            PREV_VAL_LOSS=val_srcc
+            PATH = os.path.join(ckptdir, "best.ckpt")
             torch.save(net.state_dict(), PATH)
             patience = orig_patience
         else:

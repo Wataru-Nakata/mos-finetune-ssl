@@ -19,6 +19,75 @@ def systemID(uttID):
     return uttID.split('-')[0]
 
 
+def calc_score()
+import os.path
+
+import numpy as np
+import scipy
+import scipy.stats
+import csv
+
+MAX_SCORE=100
+MIN_SCORE=0
+
+def calculate_scores(truth, submission_answer, prefix):
+    # sanity check
+    sanity_ok = True
+    diff = []
+    for wav_name in truth:
+        if wav_name not in submission_answer:
+            diff.append(wav_name)
+            sanity_ok = False
+    if not sanity_ok:
+        print("Sanity check for {} track failed. These files are not in submission:".format(prefix))
+        return {
+            prefix + "_UTT_MSE": MAX_SCORE,
+            prefix + "_UTT_LCC": MIN_SCORE,
+            prefix + "_UTT_SRCC": MIN_SCORE,
+            prefix + "_UTT_KTAU": MIN_SCORE,
+            prefix + "_SYS_MSE": MAX_SCORE,
+            prefix + "_SYS_LCC": MIN_SCORE,
+            prefix + "_SYS_SRCC": MIN_SCORE,
+            prefix + "_SYS_KTAU": MIN_SCORE,
+        }
+    else:
+        print("Sanity check for {} track succeeded.".format(prefix))
+    
+    # utterance level scores
+    sorted_truth = np.array([truth[k] for k in sorted(truth)])
+    sorted_submission_answer = np.array([submission_answer[k] for k in sorted(submission_answer) if k in truth])
+    UTT_MSE=np.mean((sorted_truth-sorted_submission_answer)**2)
+    UTT_LCC=np.corrcoef(sorted_truth, sorted_submission_answer)[0][1]
+    UTT_SRCC=scipy.stats.spearmanr(sorted_truth, sorted_submission_answer)[0]
+    UTT_KTAU=scipy.stats.kendalltau(sorted_truth, sorted_submission_answer)[0]
+
+    # system level scores
+    sorted_system_list = sorted(list(set([k.split("-")[0] for k in truth.keys()])))
+    sys_truth = {system: [v for k, v in truth.items() if k.startswith(system)] for system in sorted_system_list}
+    sys_submission = {system: [v for k, v in submission_answer.items() if k.startswith(system)] for system in sorted_system_list}
+    sorted_sys_truth = np.array([np.mean(group) for group in sys_truth.values()])
+    sorted_sys_submission = np.array([np.mean(group) for group in sys_submission.values()])
+    SYS_MSE=np.mean((sorted_sys_truth-sorted_sys_submission)**2)
+    SYS_LCC=np.corrcoef(sorted_sys_truth, sorted_sys_submission)[0][1]
+    SYS_SRCC=scipy.stats.spearmanr(sorted_sys_truth, sorted_sys_submission)[0]
+    SYS_KTAU=scipy.stats.kendalltau(sorted_sys_truth, sorted_sys_submission)[0]
+
+    return {
+        prefix + "_UTT_MSE": UTT_MSE,
+        prefix + "_UTT_LCC": UTT_LCC,
+        prefix + "_UTT_SRCC": UTT_SRCC,
+        prefix + "_UTT_KTAU": UTT_KTAU,
+        prefix + "_SYS_MSE": SYS_MSE,
+        prefix + "_SYS_LCC": SYS_LCC,
+        prefix + "_SYS_SRCC": SYS_SRCC,
+        prefix + "_SYS_KTAU": SYS_KTAU,
+    }
+def read_file(filepath):
+    with open(filepath, "r") as csvfile:
+        rows = list(csv.reader(csvfile))
+    return {os.path.splitext(row[0])[0]: float(row[1]) for row in rows}
+# open the truth file
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--fairseq_base_model', type=str, required=True, help='Path to pretrained fairseq base model.')
@@ -32,7 +101,6 @@ def main():
     datadir = args.datadir
     outfile = args.outfile
 
-    system_csv_path = os.path.join(datadir, 'mydata_system.csv')
 
     model, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([cp_path])
     ssl_model = model[0]
@@ -57,10 +125,13 @@ def main():
 
     wavdir = os.path.join(datadir, 'wav')
     validlist = os.path.join(datadir, 'sets/val_mos_list.txt')
+    testlist = os.path.join(datadir, 'sets/test_mos_list.txt')
 
     print('Loading data')
     validset = MyDataset(wavdir, validlist)
+    testset = MyDataset(wavdir, testlist)
     validloader = DataLoader(validset, batch_size=1, shuffle=True, num_workers=2, collate_fn=validset.collate_fn)
+    testloader = DataLoader(testset, batch_size=1, shuffle=True, num_workers=2, collate_fn=validset.collate_fn)
 
     total_loss = 0.0
     num_steps = 0.0
@@ -79,84 +150,33 @@ def main():
         output = outputs.cpu().detach().numpy()[0]
         predictions[filenames[0]] = output  ## batch size = 1
 
-    true_MOS = { }
-    validf = open(validlist, 'r')
-    for line in validf:
-        parts = line.strip().split(',')
-        uttID = parts[0]
-        MOS = float(parts[1])
-        true_MOS[uttID] = MOS
-
-    ## compute correls.
-    sorted_uttIDs = sorted(predictions.keys())
-    ts = []
-    ps = []
-    for uttID in sorted_uttIDs:
-        t = true_MOS[uttID]
-        p = predictions[uttID]
-        ts.append(t)
-        ps.append(p)
-
-    truths = np.array(ts)
-    preds = np.array(ps)
-
-    ### UTTERANCE
-    MSE=np.mean((truths-preds)**2)
-    print('[UTTERANCE] Test error= %f' % MSE)
-    LCC=np.corrcoef(truths, preds)
-    print('[UTTERANCE] Linear correlation coefficient= %f' % LCC[0][1])
-    SRCC=scipy.stats.spearmanr(truths.T, preds.T)
-    print('[UTTERANCE] Spearman rank correlation coefficient= %f' % SRCC[0])
-    KTAU=scipy.stats.kendalltau(truths, preds)
-    print('[UTTERANCE] Kendall Tau rank correlation coefficient= %f' % KTAU[0])
-
-    ### SYSTEM
-    true_sys_MOS_avg = { }
-    csv_file = open(system_csv_path, 'r')
-    csv_file.readline()  ## skip header
-    for line in csv_file:
-        parts = line.strip().split(',')
-        sysID = parts[0]
-        MOS = float(parts[1])
-        true_sys_MOS_avg[sysID] = MOS
-
-    pred_sys_MOSes = { }
-    for uttID in sorted_uttIDs:
-        sysID = systemID(uttID)
-        noop = pred_sys_MOSes.setdefault(sysID, [ ])
-        pred_sys_MOSes[sysID].append(predictions[uttID])
-
-    pred_sys_MOS_avg = { }
-    for k, v in pred_sys_MOSes.items():
-        avg_MOS = sum(v) / (len(v) * 1.0)
-        pred_sys_MOS_avg[k] = avg_MOS
-
-    ## make lists sorted by system
-    pred_sysIDs = sorted(pred_sys_MOS_avg.keys())
-    sys_p = [ ]
-    sys_t = [ ]
-    for sysID in pred_sysIDs:
-        sys_p.append(pred_sys_MOS_avg[sysID])
-        sys_t.append(true_sys_MOS_avg[sysID])
-
-    sys_true = np.array(sys_t)
-    sys_predicted = np.array(sys_p)
-
-    MSE=np.mean((sys_true-sys_predicted)**2)
-    print('[SYSTEM] Test error= %f' % MSE)
-    LCC=np.corrcoef(sys_true, sys_predicted)
-    print('[SYSTEM] Linear correlation coefficient= %f' % LCC[0][1])
-    SRCC=scipy.stats.spearmanr(sys_true.T, sys_predicted.T)
-    print('[SYSTEM] Spearman rank correlation coefficient= %f' % SRCC[0])
-    KTAU=scipy.stats.kendalltau(sys_true, sys_predicted)
-    print('[SYSTEM] Kendall Tau rank correlation coefficient= %f' % KTAU[0])
-
-    ## generate answer.txt for codalab
-    ans = open(outfile, 'w')
+    bvcc_truth_file = os.path.join(datadir, "sets/test_mos_list.txt")
+    bvcc_truth = read_file(bvcc_truth_file)
+    bvcc_truth_file_dev = os.path.join(datadir, "sets/val_mos_list.txt")
+    bvcc_truth_dev = read_file(bvcc_truth_file_dev)
+    calculate_scores(bvcc_truth_dev,predictions,prefix=datadir.split('/')[-1]+"DEV")
+    ans = open(outfile+'_dev', 'w')
     for k, v in predictions.items():
         outl = k.split('.')[0] + ',' + str(v) + '\n'
         ans.write(outl)
     ans.close()
+    for i, data in enumerate(testloader, 0):
+        inputs, labels, filenames = data
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        total_loss += loss.item()
+        
+        output = outputs.cpu().detach().numpy()[0]
+        predictions[filenames[0]] = output  ## batch size = 1
+
+    ans = open(outfile+"_test", 'w')
+    for k, v in predictions.items():
+        outl = k.split('.')[0] + ',' + str(v) + '\n'
+        ans.write(outl)
+    ans.close()
+    calculate_scores(bvcc_truth,predictions,prefix=datadir.split('/')[-1]+"TEST")
 
 if __name__ == '__main__':
     main()
